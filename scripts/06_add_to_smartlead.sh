@@ -20,7 +20,7 @@ leads = []
 with open(csv_path, newline="", encoding="utf-8") as f:
     for row in csv.DictReader(f):
         email = row.get("email", "").strip()
-        if not email:
+        if not email or not row.get("email_subject", "").strip():
             continue
         lead = {
             "email": email,
@@ -47,10 +47,11 @@ BATCH = 400
 pushed, failed = 0, 0
 for i in range(0, len(leads), BATCH):
     batch = leads[i:i + BATCH]
-    payload = json.dumps({"campaign_id": campaign_id, "lead_list": batch}).encode("utf-8")
+    payload = json.dumps({"lead_list": batch}).encode("utf-8")
     url = f"https://server.smartlead.ai/api/v1/campaigns/{campaign_id}/leads?api_key={api_key}"
     req = urllib.request.Request(url, data=payload, method="POST")
     req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "Mozilla/5.0")
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read())
