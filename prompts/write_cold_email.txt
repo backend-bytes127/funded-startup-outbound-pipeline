@@ -1,0 +1,17 @@
+Write a short, personalized cold email for {{first_name}} {{last_name}}, {{job_title}} at {{company_name}}.
+
+Context about their company:
+- Recently raised {{funding_amount}} from {{vc_name}}
+- Top competitors: {{competitors}}
+- Industry: {{industry}}
+- Employee count: {{employee_count}}
+
+Guidelines:
+- Under 120 words
+- First line references their recent funding round (shows research)
+- Second paragraph connects the funding to a growth challenge we can solve
+- Clear, single CTA: ask for a 15-min call
+- No generic phrases like "I hope this email finds you well"
+- Sound like a peer, not a vendor
+
+Return the email as plain text with Subject: on the first line.

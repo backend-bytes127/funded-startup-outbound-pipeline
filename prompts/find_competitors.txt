@@ -1,0 +1,1 @@
+List the top 5 competitors of {{company_name}} (website: {{company_url}}). Return only company names, one per line.

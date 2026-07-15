@@ -1,0 +1,12 @@
+.env.deepline
+.clay-session.json
+credentials.txt
+*.csv
+deepline/data/
+extract_*.json
+schema_*.json
+tmp/
+output/
+__pycache__/
+*.pyc
+.DS_Store

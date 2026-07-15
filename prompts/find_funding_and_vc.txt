@@ -1,0 +1,6 @@
+Go through the {{company_name}} and help me find out how much money the company raised and from which VC did these companies raise money
+
+Please respond in this format
+
+> Amount Raised
+> VC
