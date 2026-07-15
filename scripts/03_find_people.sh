@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Finds Senior Marketing, Sales, and CRO contacts at enriched companies (US + Canada)
+# Finds Senior Marketing, Sales, CRO contacts at enriched companies (US + Canada)
+# Usage: ./scripts/03_find_people.sh [pilot|full]
 set -euo pipefail
 
 set -a; source .env.deepline; set +a
@@ -8,81 +9,72 @@ WORKDIR="deepline/data"
 IN="$WORKDIR/companies_qualified.csv"
 OUT="$WORKDIR/contacts_raw.csv"
 MODE="${1:-pilot}"
+ROWS_FLAG=$([ "$MODE" = "full" ] && echo "--all" || echo "--rows 0:0")
 
-rows_flag() {
-  [ "$MODE" = "full" ] && echo "" || echo "--rows 0:1"
-}
+echo ">>> Mode: $MODE | $ROWS_FLAG"
+echo "=== Find people: Marketing/Sales/CRO at each company in US + Canada ==="
 
-echo "=== Find people: Senior Marketing / Sales / CRO at each company (US + Canada) ==="
-WITH_PEOPLE=$(python3 - <<'PYEOF'
-import json
-# Crustdata realtime people search — primary
-payload = {
-    "filters": {
-        "company_domain_list": ["{{domain}}"],
-        "title_keywords": [
-            "Marketing", "Sales", "Revenue", "CRO", "Chief Revenue",
-            "VP Marketing", "VP Sales", "Head of Marketing", "Head of Sales"
-        ],
-        "seniority": ["C-Suite", "VP", "Director", "Head", "Senior"],
-        "country": ["United States", "Canada"]
-    },
-    "limit": 5
-}
-print("people_results=crustdata_v2_people_search_realtime:" + json.dumps(payload))
-PYEOF
-)
-deepline enrich --input "$IN" --output "$OUT" --name find-people $(rows_flag) --with "$WITH_PEOPLE"
+WITH_P=$(python3 -c "import json; print(json.dumps({'alias':'people_results','tool':'crustdata_v2_people_search_realtime','payload':{'filters':[{'filter_type':'CURRENT_COMPANY','type':'in','value':['{{company_name}}']},{'filter_type':'CURRENT_TITLE','type':'in','value':['VP Marketing','VP Sales','Chief Revenue Officer','CRO','Chief Marketing Officer','CMO','Head of Marketing','Head of Sales','Director of Marketing','Director of Sales','VP of Marketing','VP of Sales']},{'filter_type':'REGION','type':'in','value':['United States','Canada']}],'page':1}}))")
+deepline enrich --input "$IN" --output "$OUT" --name find-people $ROWS_FLAG --with "$WITH_P"
 
-echo "=== Flatten people results: one row per contact ==="
+echo "=== Flatten: one row per contact ==="
 python3 - "$OUT" "$WORKDIR/contacts_flat.csv" <<'PYEOF'
 import csv, json, sys
 
-with open(sys.argv[1], newline="", encoding="utf-8") as fin:
+out_fields = ['first_name','last_name','full_name','job_title','linkedin_url',
+              'company_name','company_url','domain','location',
+              'funding_amount','vc_name','competitors','industry','employee_count']
+
+with open(sys.argv[1], newline='', encoding='utf-8') as fin, \
+     open(sys.argv[2], 'w', newline='', encoding='utf-8') as fout:
     reader = csv.DictReader(fin)
-    company_rows = list(reader)
-
-out_fields = [
-    "first_name", "last_name", "full_name", "job_title", "linkedin_url",
-    "company_name", "company_url", "domain", "location",
-    "funding_amount", "vc_name", "competitors", "industry", "employee_count"
-]
-
-with open(sys.argv[2], "w", newline="", encoding="utf-8") as fout:
     writer = csv.DictWriter(fout, fieldnames=out_fields)
     writer.writeheader()
     total = 0
-    for row in company_rows:
-        raw = row.get("people_results", "")
+    for row in reader:
+        raw = row.get('people_results', '') or ''
         try:
-            results = json.loads(raw) if isinstance(raw, str) else raw
-            people = results if isinstance(results, list) else results.get("profiles", results.get("results", results.get("data", [])))
+            d = json.loads(raw) if isinstance(raw, str) else raw
         except Exception:
-            people = []
-        for person in people:
-            if not person:
-                continue
-            fname = person.get("first_name", "") or ""
-            lname = person.get("last_name", "") or ""
+            d = {}
+        # Result is in toolResponse.raw.profiles (when called via enrich)
+        # or at extracted_json level
+        if isinstance(d, dict):
+            profiles = (d.get('toolResponse', {}).get('raw', {}).get('profiles')
+                       or d.get('profiles')
+                       or d.get('results')
+                       or d.get('data')
+                       or [])
+        elif isinstance(d, list):
+            profiles = d
+        else:
+            profiles = []
+
+        for p in profiles:
+            if not p: continue
+            name = p.get('name') or p.get('full_name') or ''
+            parts = name.strip().split(' ', 1)
+            fname = parts[0] if parts else ''
+            lname = parts[1] if len(parts) > 1 else ''
             writer.writerow({
-                "first_name": fname,
-                "last_name": lname,
-                "full_name": person.get("full_name") or f"{fname} {lname}".strip(),
-                "job_title": person.get("title") or person.get("job_title", ""),
-                "linkedin_url": person.get("linkedin_url") or person.get("url", ""),
-                "company_name": row.get("company_name", ""),
-                "company_url": row.get("company_url", ""),
-                "domain": row.get("domain", ""),
-                "location": person.get("location") or person.get("location_name", ""),
-                "funding_amount": row.get("funding_amount", ""),
-                "vc_name": row.get("vc_name", ""),
-                "competitors": row.get("competitors", ""),
-                "industry": row.get("industry", ""),
-                "employee_count": row.get("employee_count", ""),
+                'first_name': fname,
+                'last_name': lname,
+                'full_name': name,
+                'job_title': p.get('default_position_title') or p.get('title') or '',
+                'linkedin_url': p.get('linkedin_profile_url') or p.get('url') or '',
+                'company_name': row.get('company_name', ''),
+                'company_url': row.get('company_url', ''),
+                'domain': row.get('domain', ''),
+                'location': p.get('location') or '',
+                'funding_amount': row.get('funding_amount', ''),
+                'vc_name': row.get('vc_name', ''),
+                'competitors': row.get('competitors', ''),
+                'industry': row.get('industry', ''),
+                'employee_count': row.get('employee_count', ''),
             })
             total += 1
 
-print(f"Flattened {total} contacts → {sys.argv[2]}")
+print(f'Flattened {total} contacts → {sys.argv[2]}')
 PYEOF
 
-echo "Done. Run with 'full' to process all companies: ./scripts/03_find_people.sh full"
+echo "Done. Run full: ./scripts/03_find_people.sh full"

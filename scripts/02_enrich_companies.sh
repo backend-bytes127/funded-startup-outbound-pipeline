@@ -1,186 +1,113 @@
 #!/usr/bin/env bash
 # AI-enriches each RSS item: article URL → company name/URL → funding/VC → competitors → company data
-# Runs a one-row pilot first; pass "full" to run all rows.
+# Usage: ./scripts/02_enrich_companies.sh [pilot|full]  (default: pilot = 1 row)
 set -euo pipefail
 
 set -a; source .env.deepline; set +a
-: "${SMARTLEAD_API_KEY:?SMARTLEAD_API_KEY must be set in .env.deepline}"
 
 WORKDIR="deepline/data"
 SEED="$WORKDIR/seed_companies.csv"
 WORK="$WORKDIR/enriched_companies.csv"
 MODE="${1:-pilot}"
+ROWS_FLAG=$([ "$MODE" = "full" ] && echo "--all" || echo "--rows 0:0")
 
-rows_flag() {
-  [ "$MODE" = "full" ] && echo "" || echo "--rows 0:1"
-}
+echo ">>> Mode: $MODE | $ROWS_FLAG"
 
 echo "=== Pass 1: Find article URL from title ==="
-WITH_ARTICLE_URL=$(python3 - <<'PYEOF'
-import json
-payload = {
-    "prompt": "Given the {{title}} find the right url that is talking about this news",
-    "jsonSchema": {
-        "type": "object",
-        "properties": {"article_url": {"type": "string", "description": "The direct article URL"}},
-        "required": ["article_url"]
-    }
-}
-print("article_data=deeplineagent:" + json.dumps(payload))
-PYEOF
-)
-deepline enrich --input "$SEED" --output "$WORK" --name rss-pass1-article-url $(rows_flag) --with "$WITH_ARTICLE_URL"
+WITH1=$(python3 -c "import json; print(json.dumps({'alias':'article_data','tool':'deeplineagent','payload':{'prompt':'Given the title: {{title}} — find the correct news article URL that covers this story. Return only the URL.','jsonSchema':{'type':'object','properties':{'article_url':{'type':'string'}},'required':['article_url']}}}))")
+deepline enrich --input "$SEED" --output "$WORK" --name rss-p1-article $ROWS_FLAG --force --with "$WITH1"
 
 echo "=== Pass 2: Extract company name and URL ==="
-WITH_COMPANY=$(python3 - <<'PYEOF'
-import json
-payload = {
-    "prompt": "Given the article at {{article_data.article_url}} help me find the company name and company url that raised money. If article_url is empty, use the title: {{title}}",
-    "jsonSchema": {
-        "type": "object",
-        "properties": {
-            "company_name": {"type": "string"},
-            "company_url": {"type": "string"}
-        },
-        "required": ["company_name", "company_url"]
-    }
-}
-print("company_details=deeplineagent:" + json.dumps(payload))
-PYEOF
-)
-deepline enrich --input "$WORK" --in-place --name rss-pass2-company $(rows_flag) --with "$WITH_COMPANY"
+WITH2=$(python3 -c "import json; print(json.dumps({'alias':'company_details','tool':'deeplineagent','payload':{'prompt':'Given the article at {{article_data.article_url}} (title: {{title}}), find the startup company name and company website URL that raised the funding. Return the startup that raised money, not the VC.','jsonSchema':{'type':'object','properties':{'company_name':{'type':'string'},'company_url':{'type':'string'}},'required':['company_name','company_url']}}}))")
+deepline enrich --input "$WORK" --in-place --name rss-p2-company $ROWS_FLAG --with "$WITH2"
 
 echo "=== Pass 3: Find funding amount and VC ==="
-WITH_FUNDING=$(python3 - <<'PYEOF'
-import json
-payload = {
-    "prompt": "Go through {{company_details.company_name}} (website: {{company_details.company_url}}) and find how much money the company raised and from which VC. Use the article at {{article_data.article_url}} as primary source.\n\nReturn:\n> Amount Raised\n> VC",
-    "jsonSchema": {
-        "type": "object",
-        "properties": {
-            "funding_amount": {"type": "string"},
-            "vc_name": {"type": "string"}
-        },
-        "required": ["funding_amount", "vc_name"]
-    }
-}
-print("funding_data=deeplineagent:" + json.dumps(payload))
-PYEOF
-)
-deepline enrich --input "$WORK" --in-place --name rss-pass3-funding $(rows_flag) --with "$WITH_FUNDING"
+WITH3=$(python3 -c "import json; print(json.dumps({'alias':'funding_data','tool':'deeplineagent','payload':{'prompt':'For {{company_details.company_name}} ({{company_details.company_url}}), find how much money was raised and which VC led the round. Use article at {{article_data.article_url}} as source.','jsonSchema':{'type':'object','properties':{'funding_amount':{'type':'string'},'vc_name':{'type':'string'}},'required':['funding_amount','vc_name']}}}))")
+deepline enrich --input "$WORK" --in-place --name rss-p3-funding $ROWS_FLAG --with "$WITH3"
 
 echo "=== Pass 4: Find top 5 competitors ==="
-WITH_COMPETITORS=$(python3 - <<'PYEOF'
-import json
-payload = {
-    "prompt": "List the top 5 competitors of {{company_details.company_name}} (website: {{company_details.company_url}}). Return only company names, one per line.",
-    "jsonSchema": {
-        "type": "object",
-        "properties": {
-            "competitors": {"type": "string", "description": "Top 5 competitor names, newline-separated"}
-        },
-        "required": ["competitors"]
-    }
-}
-print("competitors_data=deeplineagent:" + json.dumps(payload))
-PYEOF
-)
-deepline enrich --input "$WORK" --in-place --name rss-pass4-competitors $(rows_flag) --with "$WITH_COMPETITORS"
+WITH4=$(python3 -c "import json; print(json.dumps({'alias':'competitors_data','tool':'deeplineagent','payload':{'prompt':'List the top 5 competitors of {{company_details.company_name}} (website: {{company_details.company_url}}). Return only company names, one per line.','jsonSchema':{'type':'object','properties':{'competitors':{'type':'string','description':'Top 5 competitor names, newline-separated'}},'required':['competitors']}}}))")
+deepline enrich --input "$WORK" --in-place --name rss-p4-competitors $ROWS_FLAG --with "$WITH4"
 
-echo "=== Pass 5: Enrich company via Crustdata ==="
-WITH_CRUSTDATA=$(python3 - <<'PYEOF'
-import json
-payload = {
-    "company_website_domain_list": "{{company_details.company_url}}"
-}
-print("company_enrich=crustdata_companydb_search:" + json.dumps(payload))
-PYEOF
-)
-deepline enrich --input "$WORK" --in-place --name rss-pass5-crustdata $(rows_flag) --with "$WITH_CRUSTDATA"
+echo "=== Pass 5: Crustdata company enrich ==="
+WITH5=$(python3 -c "import json; print(json.dumps({'alias':'company_enrich','tool':'crustdata_v3_company_enrich','payload':{'domains':['{{company_details.company_url}}'],'exact_match':False}}))")
+deepline enrich --input "$WORK" --in-place --name rss-p5-crustdata $ROWS_FLAG --with "$WITH5"
 
-echo "=== Pass 5b: LeadMagic company fallback ==="
-WITH_LEADMAGIC=$(python3 - <<'PYEOF'
-import json
-payload = {
-    "company_name": "{{company_details.company_name}}",
-    "domain": "{{company_details.company_url}}"
-}
-print("leadmagic_enrich=leadmagic_company_enrichment:" + json.dumps(payload))
-PYEOF
-)
-deepline enrich --input "$WORK" --in-place --name rss-pass5b-leadmagic $(rows_flag) --with "$WITH_LEADMAGIC"
+echo "=== Pass 5b: LeadMagic company search fallback ==="
+WITH5B=$(python3 -c "import json; print(json.dumps({'alias':'leadmagic_enrich','tool':'leadmagic_company_search','payload':{'domain':'{{company_details.company_url}}'}}))")
+deepline enrich --input "$WORK" --in-place --name rss-p5b-leadmagic $ROWS_FLAG --with "$WITH5B"
 
-echo "=== Pass 6: Flatten and filter >50 employees ==="
+echo "=== Pass 6: Flatten and output qualified companies ==="
 python3 - "$WORK" "$WORKDIR/companies_qualified.csv" <<'PYEOF'
-import csv, json
+import csv, json, sys
+
+def parse_deepline(row, col):
+    raw = row.get(col, '') or ''
+    if not raw: return {}
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return {}
+    if isinstance(d, dict):
+        return d.get('extracted_json') or d.get('result',{}).get('object') or d
+    return {}
 
 def get_employee_count(row):
-    # Try crustdata first
-    enrich = row.get("company_enrich", "")
-    if enrich:
+    ce_raw = row.get('company_enrich', '') or ''
+    if ce_raw:
         try:
-            d = json.loads(enrich) if isinstance(enrich, str) else enrich
-            ec = d.get("employeeCount") or d.get("employee_count") or d.get("size", 0)
-            return int(str(ec).replace(",", "").split("-")[-1].strip()) if ec else 0
+            ce = json.loads(ce_raw)
+            matches = ce if isinstance(ce, list) else ce.get('matches', [])
+            for match in matches:
+                cd = match.get('company_data', {}) or {}
+                hc = cd.get('headcount')
+                if isinstance(hc, dict):
+                    val = hc.get('current') or hc.get('value')
+                    if val: return int(val)
+                elif isinstance(hc, (int, float)):
+                    return int(hc)
         except Exception:
             pass
-    # Try leadmagic fallback
-    lm = row.get("leadmagic_enrich", "")
-    if lm:
+    lm_raw = row.get('leadmagic_enrich', '') or ''
+    if lm_raw.startswith('{'):
         try:
-            d = json.loads(lm) if isinstance(lm, str) else lm
-            ec = d.get("employeecount") or d.get("employee_count", 0)
-            return int(ec) if ec else 0
+            lm = json.loads(lm_raw)
+            ec = lm.get('employeecount') or lm.get('employee_count') or lm.get('headcount')
+            if ec: return int(str(ec).replace(',',''))
         except Exception:
             pass
     return 0
 
-def get_domain(row):
-    url = row.get("company_details", {})
-    if isinstance(url, str):
-        try:
-            url = json.loads(url)
-        except Exception:
-            return ""
-    company_url = url.get("company_url", "")
-    return company_url.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
-
-with open(sys.argv[1], newline="", encoding="utf-8") as fin, \
-     open(sys.argv[2], "w", newline="", encoding="utf-8") as fout:
+with open(sys.argv[1], newline='', encoding='utf-8') as fin, \
+     open(sys.argv[2], 'w', newline='', encoding='utf-8') as fout:
     reader = csv.DictReader(fin)
-    out_fields = ["title", "article_url", "company_name", "company_url", "domain",
-                  "funding_amount", "vc_name", "competitors", "industry", "employee_count"]
+    out_fields = ['title','article_url','company_name','company_url','domain',
+                  'funding_amount','vc_name','competitors','industry','employee_count']
     writer = csv.DictWriter(fout, fieldnames=out_fields)
     writer.writeheader()
-    total, kept = 0, 0
+    total = 0
     for row in reader:
         total += 1
-        emp = get_employee_count(row)
-        if emp < 50:
-            continue
-        try:
-            cd = json.loads(row.get("company_details", "{}")) if isinstance(row.get("company_details"), str) else row.get("company_details", {})
-            fd = json.loads(row.get("funding_data", "{}")) if isinstance(row.get("funding_data"), str) else row.get("funding_data", {})
-            comp = json.loads(row.get("competitors_data", "{}")) if isinstance(row.get("competitors_data"), str) else row.get("competitors_data", {})
-            ad = json.loads(row.get("article_data", "{}")) if isinstance(row.get("article_data"), str) else row.get("article_data", {})
-        except Exception:
-            cd, fd, comp, ad = {}, {}, {}, {}
+        cd = parse_deepline(row, 'company_details')
+        fd = parse_deepline(row, 'funding_data')
+        comp = parse_deepline(row, 'competitors_data')
+        ad = parse_deepline(row, 'article_data')
+        company_url = (cd.get('company_url') or '').strip()
+        domain = company_url.replace('https://','').replace('http://','').replace('www.','').split('/')[0]
         writer.writerow({
-            "title": row.get("title", ""),
-            "article_url": ad.get("article_url", ""),
-            "company_name": cd.get("company_name", ""),
-            "company_url": cd.get("company_url", ""),
-            "domain": get_domain(row),
-            "funding_amount": fd.get("funding_amount", ""),
-            "vc_name": fd.get("vc_name", ""),
-            "competitors": comp.get("competitors", ""),
-            "industry": "",
-            "employee_count": emp,
+            'title': row.get('title',''),
+            'article_url': ad.get('article_url',''),
+            'company_name': cd.get('company_name',''),
+            'company_url': company_url,
+            'domain': domain,
+            'funding_amount': fd.get('funding_amount',''),
+            'vc_name': fd.get('vc_name',''),
+            'competitors': comp.get('competitors',''),
+            'industry': '',
+            'employee_count': get_employee_count(row),
         })
-        kept += 1
 
-import sys
-print(f"Filtered: {kept}/{total} companies with >50 employees → {sys.argv[2]}")
+print(f'Wrote {total} rows → {sys.argv[2]}')
 PYEOF
 
-echo "Done. Run with 'full' to process all rows: ./scripts/02_enrich_companies.sh full"
+echo "Done. Run full: ./scripts/02_enrich_companies.sh full"
